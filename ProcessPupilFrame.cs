@@ -18,7 +18,6 @@ namespace PupilDetectionFunction
         private readonly ILogger<ProcessPupilFrame> _logger;
         private readonly CascadeClassifier _eyeCascade;
         private readonly InferenceSession _onnxSession;
-        private readonly RIPARealTime _ripaRealTime;
         private readonly List<double> _pupilDiameters = new();
         private readonly List<double> _savedPupilDiameters = new();
 
@@ -38,9 +37,6 @@ namespace PupilDetectionFunction
             // Initialize ONNX model
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "Models", "model.onnx");
             _onnxSession = new InferenceSession(modelPath);
-
-            // Initialize RIPARealTime
-            _ripaRealTime = new RIPARealTime(6, 6, 3, 100, 1.0);
         }
 
         [Function("ProcessPupilFrame")]
@@ -52,36 +48,18 @@ namespace PupilDetectionFunction
             // Read image from request (base64 encoded)
             string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
             var requestData = JsonSerializer.Deserialize<RequestData>(requestBody);
-            if (string.IsNullOrEmpty(requestData.ImageBase64))
+            if (string.IsNullOrEmpty(requestData.ImageBase64) && !requestData.SaveDiameters)
             {
                 var errorResponse = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
                 await errorResponse.WriteStringAsync("Missing or invalid 'imageBase64' in request body.");
                 return errorResponse;
             }
 
-            byte[] imageBytes;
-            try
-            {
-                imageBytes = Convert.FromBase64String(requestData.ImageBase64);
-            }
-            catch (Exception ex)
-            {
-                var errorResponse = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
-                await errorResponse.WriteStringAsync($"Invalid base64 image: {ex.Message}");
-                return errorResponse;
-            }
-
-            // Convert to Mat
-            using Mat matFrame = Cv2.ImDecode(imageBytes, ImreadModes.Color);
-            if (matFrame.Empty())
-            {
-                var errorResponse = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
-                await errorResponse.WriteStringAsync("Failed to decode image.");
-                return errorResponse;
-            }
+            // Create RIPARealTime instance for this request
+            var ripaRealTime = new RIPARealTime(6, 6, 3, 100, 1.0);
 
             // Process frame, passing requestData
-            var result = ProcessFrame(matFrame, requestData);
+            var result = ProcessFrame(requestData, ripaRealTime);
 
             // Create response
             var response = req.CreateResponse(System.Net.HttpStatusCode.OK);
@@ -90,86 +68,119 @@ namespace PupilDetectionFunction
             return response;
         }
 
-        private object ProcessFrame(Mat matFrame, RequestData requestData)
+        private object ProcessFrame(RequestData requestData, RIPARealTime ripaRealTime)
         {
-            // Detect eyes
-            OpenCvSharp.Rect[] eyes = _eyeCascade.DetectMultiScale(matFrame, scaleFactor: 1.3, minNeighbors: 5, minSize: new OpenCvSharp.Size(30, 30));
-
             string diametersOutput = "";
             double totalPupilDiameter = 0;
             int pupilCount = 0;
-            int maxEyesToProcess = 2;
-            int eyesProcessed = 0;
+            string processedImageBase64 = "";
+            Mat matFrame = null;
 
-            foreach (var eye in eyes)
+            // Process image if provided
+            if (!string.IsNullOrEmpty(requestData.ImageBase64))
             {
-                if (eyesProcessed >= maxEyesToProcess)
-                    break;
-
-                // Draw rectangle around eye
-                Cv2.Rectangle(matFrame, eye, new Scalar(255, 0, 0), 2);
-
-                // Extract and preprocess eye region
-                using Mat eyeRegion = new Mat(matFrame, eye);
-                using Mat resizedEyeRegion = new Mat();
-                Cv2.Resize(eyeRegion, resizedEyeRegion, new OpenCvSharp.Size(128, 128));
-
-                using Mat grayEyeRegion = new Mat();
-                Cv2.CvtColor(resizedEyeRegion, grayEyeRegion, ColorConversionCodes.BGR2GRAY);
-                grayEyeRegion.ConvertTo(grayEyeRegion, MatType.CV_32F, 1.0 / 255.0);
-
-                float[] inputData = new float[128 * 128];
-                grayEyeRegion.GetArray(out inputData);
-
-                // Prepare ONNX input tensor
-                var inputTensor = new DenseTensor<float>(inputData, new[] { 1, 128, 128, 1 });
-                var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input_1", inputTensor) };
-
-                // Run inference
-                using var results = _onnxSession.Run(inputs);
-                var outputTensor = results.First().AsTensor<float>();
-                var heatmap = outputTensor.ToArray();
-                int heatmapWidth = outputTensor.Dimensions[3];
-                int heatmapHeight = outputTensor.Dimensions[2];
-
-                // Find max value in heatmap
-                double maxVal = double.MinValue;
-                int maxX = 0, maxY = 0;
-                for (int y = 0; y < heatmapHeight; y++)
+                byte[] imageBytes;
+                try
                 {
-                    for (int x = 0; x < heatmapWidth; x++)
+                    imageBytes = Convert.FromBase64String(requestData.ImageBase64);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"Invalid base64 image: {ex.Message}");
+                    return new { Error = $"Invalid base64 image: {ex.Message}" };
+                }
+
+                // Convert to Mat
+                matFrame = Cv2.ImDecode(imageBytes, ImreadModes.Color);
+                if (matFrame.Empty())
+                {
+                    _logger.LogError("Failed to decode image.");
+                    return new { Error = "Failed to decode image." };
+                }
+
+                // Detect eyes
+                OpenCvSharp.Rect[] eyes = _eyeCascade.DetectMultiScale(matFrame, scaleFactor: 1.3, minNeighbors: 5, minSize: new OpenCvSharp.Size(30, 30));
+
+                int maxEyesToProcess = 2;
+                int eyesProcessed = 0;
+
+                foreach (var eye in eyes)
+                {
+                    if (eyesProcessed >= maxEyesToProcess)
+                        break;
+
+                    // Draw rectangle around eye
+                    Cv2.Rectangle(matFrame, eye, new Scalar(255, 0, 0), 2);
+
+                    // Extract and preprocess eye region
+                    using Mat eyeRegion = new Mat(matFrame, eye);
+                    using Mat resizedEyeRegion = new Mat();
+                    Cv2.Resize(eyeRegion, resizedEyeRegion, new OpenCvSharp.Size(128, 128));
+
+                    using Mat grayEyeRegion = new Mat();
+                    Cv2.CvtColor(resizedEyeRegion, grayEyeRegion, ColorConversionCodes.BGR2GRAY);
+                    grayEyeRegion.ConvertTo(grayEyeRegion, MatType.CV_32F, 1.0 / 255.0);
+
+                    float[] inputData = new float[128 * 128];
+                    grayEyeRegion.GetArray(out inputData);
+
+                    // Prepare ONNX input tensor
+                    var inputTensor = new DenseTensor<float>(inputData, new[] { 1, 128, 128, 1 });
+                    var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input_1", inputTensor) };
+
+                    // Run inference
+                    using var results = _onnxSession.Run(inputs);
+                    var outputTensor = results.First().AsTensor<float>();
+                    var heatmap = outputTensor.ToArray();
+                    int heatmapWidth = outputTensor.Dimensions[3];
+                    int heatmapHeight = outputTensor.Dimensions[2];
+
+                    // Find max value in heatmap
+                    double maxVal = double.MinValue;
+                    int maxX = 0, maxY = 0;
+                    for (int y = 0; y < heatmapHeight; y++)
                     {
-                        double value = heatmap[y * heatmapWidth + x];
-                        if (value > maxVal)
+                        for (int x = 0; x < heatmapWidth; x++)
                         {
-                            maxVal = value;
-                            maxX = x;
-                            maxY = y;
+                            double value = heatmap[y * heatmapWidth + x];
+                            if (value > maxVal)
+                            {
+                                maxVal = value;
+                                maxX = x;
+                                maxY = y;
+                            }
                         }
                     }
+
+                    // Calculate pupil center
+                    double pupilX = maxX * eye.Width / (double)heatmapWidth + eye.X;
+                    double pupilY = maxY * eye.Height / (double)heatmapHeight + eye.Y;
+                    Cv2.Circle(matFrame, new Point(pupilX, pupilY), 5, new Scalar(0, 255, 0), -1);
+
+                    // Assume second output is pupil area (adjust based on your model)
+                    float pupilArea = results.Count > 1 ? results[1].AsTensor<float>()[0] : 0;
+                    if (pupilArea > 0)
+                    {
+                        double pupilDiameter = 2 * Math.Sqrt(pupilArea / Math.PI);
+                        _pupilDiameters.Add(pupilDiameter);
+                        totalPupilDiameter += pupilDiameter;
+                        pupilCount++;
+                        diametersOutput += $"{pupilDiameter:F2} ";
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Unexpected model output length.");
+                    }
+
+                    eyesProcessed++;
                 }
 
-                // Calculate pupil center
-                double pupilX = maxX * eye.Width / (double)heatmapWidth + eye.X;
-                double pupilY = maxY * eye.Height / (double)heatmapHeight + eye.Y;
-                Cv2.Circle(matFrame, new Point(pupilX, pupilY), 5, new Scalar(0, 255, 0), -1);
-
-                // Assume second output is pupil area (adjust based on your model)
-                float pupilArea = results.Count > 1 ? results[1].AsTensor<float>()[0] : 0;
-                if (pupilArea > 0)
+                // Encode processed image
+                if (matFrame != null)
                 {
-                    double pupilDiameter = 2 * Math.Sqrt(pupilArea / Math.PI);
-                    _pupilDiameters.Add(pupilDiameter);
-                    totalPupilDiameter += pupilDiameter;
-                    pupilCount++;
-                    diametersOutput += $"{pupilDiameter:F2} ";
+                    byte[] processedImageBytes = matFrame.ImEncode(".jpg");
+                    processedImageBase64 = Convert.ToBase64String(processedImageBytes);
                 }
-                else
-                {
-                    _logger.LogWarning("Unexpected model output length.");
-                }
-
-                eyesProcessed++;
             }
 
             // Calculate average and process with RIPA
@@ -178,12 +189,25 @@ namespace PupilDetectionFunction
             if (pupilCount > 0)
             {
                 averagePupilDiameter = totalPupilDiameter / pupilCount;
-                ripaValue = _ripaRealTime.ProcessData(averagePupilDiameter.Value);
             }
 
-            // Encode processed image
-            byte[] processedImageBytes = matFrame.ImEncode(".jpg");
-            string processedImageBase64 = Convert.ToBase64String(processedImageBytes);
+            // Process the provided AveragePupilDiameterBuffer
+            if (requestData.AveragePupilDiameterBuffer != null && requestData.AveragePupilDiameterBuffer.Any())
+            {
+                foreach (var diameter in requestData.AveragePupilDiameterBuffer)
+                {
+                    ripaValue = ripaRealTime.ProcessData(diameter);
+                }
+                // Use the last ripaValue (most recent)
+                if (averagePupilDiameter.HasValue)
+                {
+                    ripaValue = ripaRealTime.ProcessData(averagePupilDiameter.Value);
+                }
+            }
+            else if (averagePupilDiameter.HasValue)
+            {
+                ripaValue = ripaRealTime.ProcessData(averagePupilDiameter.Value);
+            }
 
             // Prepare response data
             var result = new
@@ -199,11 +223,11 @@ namespace PupilDetectionFunction
             return result;
         }
 
-        private List<double> SavePupilDiameters()
+        private double[] SavePupilDiameters()
         {
             _savedPupilDiameters.AddRange(_pupilDiameters);
             _logger.LogInformation("Pupil diameters saved.");
-            var saved = new List<double>(_savedPupilDiameters);
+            var saved = _savedPupilDiameters.ToArray();
             _pupilDiameters.Clear();
             return saved;
         }
@@ -213,6 +237,7 @@ namespace PupilDetectionFunction
         {
             public string ImageBase64 { get; set; } = string.Empty;
             public bool SaveDiameters { get; set; }
+            public double[] AveragePupilDiameterBuffer { get; set; } = Array.Empty<double>();
         }
     }
 
