@@ -1,38 +1,32 @@
-### 📘 **README.md**
+# 👁️ Azure Pupil Detection Function
 
-```markdown
-# Azure Pupil Detection Function
-
-This project implements a serverless Azure Function to perform real-time pupil detection from image frames using OpenCV and ONNX-based deep learning models. It is designed for fast deployment in Azure environments and can be used in eye-tracking applications, accessibility tools, or attention monitoring systems.
+A serverless Azure Function that performs real-time pupil detection from image frames using OpenCV and ONNX-based deep learning models. Ideal for integration into eye-tracking systems, accessibility platforms, or attention-monitoring applications.
 
 ---
 
-## 🚀 Features
+## 🚀 Key Features
 
-- Azure Function-based architecture
-- Frame-by-frame pupil detection
-- Uses pre-trained ONNX model for deep learning inference
-- Supports Haar Cascade for eye detection
-- JSON input/output handling
-- Designed for scalable, event-driven workloads in Azure
+- ⚡ Serverless deployment using Azure Functions
+- 🧠 Pupil detection with ONNX deep learning inference
+- 🔍 Eye region pre-detection using Haar Cascades
+- 📦 JSON input/output support for API integration
+- ☁️ Scalable, event-driven design for Azure cloud environments
 
 ---
 
-## 🛠 Project Structure
+## 🧾 Project Structure
 
 ```
-
 .
-├── Program.cs                  # Azure Functions bootstrap
-├── ProcessPupilFrame.cs       # Core logic for frame processing
+├── Program.cs                     # Azure Functions bootstrap
+├── ProcessPupilFrame.cs          # Core logic for pupil detection
 ├── PupilDetectionFunction.csproj # Project configuration
 ├── Models/
-│   ├── haarcascade\_eye.xml    # Haar cascade XML for eye detection
-│   └── model.onnx             # ONNX deep learning model
-├── host.json                  # Azure Functions host configuration
-├── local.settings.json        # Local dev settings (excluded from deployment)
-
-````
+│   ├── haarcascade_eye.xml       # Haar Cascade for initial eye region detection
+│   └── model.onnx                # ONNX model for pupil localization
+├── host.json                     # Azure Functions host settings
+├── local.settings.json           # Local development settings (excluded from repo)
+```
 
 ---
 
@@ -40,16 +34,17 @@ This project implements a serverless Azure Function to perform real-time pupil d
 
 - [.NET 6 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
 - [Azure Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local)
+- Python (optional, for preprocessing or debugging)
 
 ---
 
-## 🔧 Setup & Deployment
+## ⚙️ Setup & Deployment
 
 ### Run Locally
 
 ```bash
 func start
-````
+```
 
 ### Deploy to Azure
 
@@ -59,9 +54,9 @@ func azure functionapp publish <YOUR_FUNCTION_APP_NAME>
 
 ---
 
-## 📥 Input
+## 📥 Input Format
 
-The function expects a JSON payload containing a base64-encoded image frame:
+The function expects a **JSON payload** with a base64-encoded image frame:
 
 ```json
 {
@@ -71,9 +66,9 @@ The function expects a JSON payload containing a base64-encoded image frame:
 
 ---
 
-## 📤 Output
+## 📤 Output Format
 
-The function returns the coordinates of detected pupils:
+Returns detected pupil bounding boxes as a list of coordinate objects:
 
 ```json
 {
@@ -86,10 +81,21 @@ The function returns the coordinates of detected pupils:
 
 ---
 
-## 🧠 Model Info
+## 🧠 Model Details
 
-* `model.onnx`: Deep learning model for fine pupil localization.
-* `haarcascade_eye.xml`: Used for rapid detection of eye regions before detailed inference.
+- `model.onnx`: A lightweight ONNX model trained for precise pupil localization.
+- `haarcascade_eye.xml`: Used for efficient pre-detection of eye regions using OpenCV.
 
 ---
 
+## 🔐 Security Note
+
+Ensure all image data is sanitized and base64 strings are validated to prevent payload injection in production environments.
+
+---
+
+## 🙌 Acknowledgments
+
+- [Azure Functions](https://azure.microsoft.com/services/functions/)
+- [OpenCV](https://opencv.org/)
+- [ONNX Runtime](https://onnxruntime.ai/)
